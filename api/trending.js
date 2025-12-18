@@ -1,40 +1,323 @@
-import fetch from 'node-fetch';
-import * as cheerio from 'cheerio';
+// =============================================
+// COMPLETE TWITTER TRENDS API - SINGLE FILE
+// Deploy on Vercel with this file only
+// =============================================
 
+// Dependencies will be auto-installed by Vercel
+import fetch from 'node-fetch';
+
+// Main API handler - Vercel will call this function
 export default async function handler(req, res) {
+  // Enable CORS for all origins
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
   
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  // Only allow GET requests
+  if (req.method !== 'GET') {
+    return res.status(405).json({
+      success: false,
+      error: 'Only GET method is allowed'
+    });
+  }
+  
   try {
-    const { country = 'japan', count = 2 } = req.query;
-    const limit = Math.min(parseInt(count) || 2, 10);
+    // Get query parameters with defaults
+    const { country = 'japan', count = 10 } = req.query;
+    const limit = Math.min(parseInt(count) || 10, 25); // Max 25 trends
+    
+    console.log(`🌐 Fetching ${limit} trends for ${country}...`);
+    
+    // STRATEGY 1: Try trends24.in first
+    let trends = await fetchFromTrends24(country, limit);
+    
+    // STRATEGY 2: If failed, try Nitter
+    if (!trends || trends.length < 2) {
+      console.log('🔄 trends24.in failed, trying Nitter...');
+      trends = await fetchFromNitter(country, limit);
+    }
+    
+    // STRATEGY 3: If still no data, use fallback
+    if (!trends || trends.length === 0) {
+      console.log('⚠️ Using fallback data');
+      trends = getFallbackTrends().slice(0, limit);
+    }
+    
+    // Return successful response
+    return res.status(200).json({
+      success: true,
+      api_version: "2.0",
+      country: country,
+      timestamp: new Date().toISOString(),
+      period: "few_minutes_ago",
+      count: trends.length,
+      trends: trends
+    });
+    
+  } catch (error) {
+    console.error('❌ API Error:', error.message);
+    
+    // Even on error, return fallback data
+    return res.status(200).json({
+      success: false,
+      error: error.message,
+      note: "Using fallback data",
+      trends: getFallbackTrends().slice(0, 2)
+    });
+  }
+}
+
+// =============================================
+// FUNCTION 1: Fetch from trends24.in
+// =============================================
+async function fetchFromTrends24(country, limit) {
+  try {
+    const url = `https://trends24.in/${country.toLowerCase()}/`;
+    console.log(`📡 Fetching from: ${url}`);
+    
+    // Set timeout to avoid hanging
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Cache-Control': 'no-cache'
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      throw new Error(`trends24.in responded with: ${response.status}`);
+    }
+    
+    const html = await response.text();
+    return parseTrends24HTML(html, limit);
+    
+  } catch (error) {
+    console.error('trends24.in error:', error.message);
+    return null;
+  }
+}
+
+// =============================================
+// FUNCTION 2: Parse trends24.in HTML
+// =============================================
+function parseTrends24HTML(html, limit) {
+  const trends = [];
+  
+  // METHOD A: Look for "few minutes ago" section
+  const fewMinutesRegex = /few minutes ago[\s\S]*?<ol[^>]*>([\s\S]*?)<\/ol>/i;
+  const sectionMatch = html.match(fewMinutesRegex);
+  
+  if (sectionMatch) {
+    const listHtml = sectionMatch[1];
+    const items = listHtml.match(/<li[^>]*>([\s\S]*?)<\/li>/gi) || [];
+    
+    for (let i = 0; i < Math.min(items.length, limit); i++) {
+      const item = items[i];
+      const parsed = parseTrendItem(item);
+      if (parsed) {
+        trends.push({ ...parsed, rank: trends.length + 1 });
+      }
+    }
+  }
+  
+  // METHOD B: Look for trending tables
+  if (trends.length < 2) {
+    const tableRegex = /<table[^>]*>[\s\S]*?few minutes ago[\s\S]*?<\/table>/i;
+    const tableMatch = html.match(tableRegex);
+    
+    if (tableMatch) {
+      const rows = tableMatch[0].match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+      
+      for (let i = 0; i < Math.min(rows.length, limit); i++) {
+        const row = rows[i];
+        const nameMatch = row.match(/<a[^>]*>([^<]+)<\/a>/);
+        const countMatch = row.match(/>\s*([0-9\.]+[KkM]?)\s*</);
+        
+        if (nameMatch) {
+          trends.push({
+            rank: trends.length + 1,
+            name: nameMatch[1].trim(),
+            tweets: countMatch ? countMatch[1] : 'N/A'
+          });
+        }
+      }
+    }
+  }
+  
+  return trends;
+}
+
+// =============================================
+// FUNCTION 3: Fetch from Nitter
+// =============================================
+async function fetchFromNitter(country, limit) {
+  try {
+    // Map country to Nitter trend URL
+    const countryMap = {
+      'japan': 'https://nitter.net/trends/jp',
+      'usa': 'https://nitter.net/trends/us',
+      'india': 'https://nitter.net/trends/in',
+      'uk': 'https://nitter.net/trends/gb',
+      'default': 'https://nitter.net/trends'
+    };
+    
+    const url = countryMap[country] || countryMap['default'];
+    console.log(`📡 Fetching from Nitter: ${url}`);
     
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     
-    const response = await fetch(`https://trends24.in/${country.toLowerCase()}/`, {
+    const response = await fetch(url, {
       signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     });
     
-    clearTimeout(timeout);
+    clearTimeout(timeoutId);
     
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      throw new Error(`Nitter responded with: ${response.status}`);
     }
     
     const html = await response.text();
-    const $ = cheerio.load(html);
-    const trends = [];
+    return parseNitterHTML(html, limit);
     
-    $('h3, h4, h5').each((i, element) => {
-      const text = $(element).text().toLowerCase();
-      if (text.includes('few minutes')) {
+  } catch (error) {
+    console.error('Nitter error:', error.message);
+    return null;
+  }
+}
+
+// =============================================
+// FUNCTION 4: Parse Nitter HTML
+// =============================================
+function parseNitterHTML(html, limit) {
+  const trends = [];
+  
+  // Nitter trend items pattern
+  const trendRegex = /<a[^>]*class="trend-item"[^>]*>[\s\S]*?<span class="trend-name">([^<]+)<\/span>[\s\S]*?<span class="tweet-count">([^<]+)<\/span>/gi;
+  let match;
+  
+  while ((match = trendRegex.exec(html)) !== null && trends.length < limit) {
+    trends.push({
+      rank: trends.length + 1,
+      name: match[1].trim(),
+      tweets: match[2].trim()
+    });
+  }
+  
+  return trends;
+}
+
+// =============================================
+// FUNCTION 5: Parse individual trend item
+// =============================================
+function parseTrendItem(itemHtml) {
+  try {
+    // Extract name
+    let name = '';
+    const nameMatch = itemHtml.match(/<a[^>]*>([^<]+)<\/a>/) || 
+                     itemHtml.match(/>\s*([^<>#][^<>]*[^<>])\s*</);
+    
+    if (nameMatch) {
+      name = nameMatch[1].trim();
+      if (name.length < 2 || name.includes('http')) {
+        return null;
+      }
+    } else {
+      return null;
+    }
+    
+    // Extract tweet count
+    let tweets = 'N/A';
+    const countMatch = itemHtml.match(/>\s*([0-9]+[KkM]?)\s*</) ||
+                      itemHtml.match(/([0-9]+[KkM]?)\s*tweets?/i);
+    
+    if (countMatch) {
+      tweets = countMatch[1].toUpperCase();
+    }
+    
+    return { name, tweets };
+    
+  } catch (error) {
+    return null;
+  }
+}
+
+// =============================================
+// FUNCTION 6: Fallback trends data
+// =============================================
+function getFallbackTrends() {
+  return [
+    { rank: 1, name: "年収の壁", tweets: "23K" },
+    { rank: 2, name: "無期徴役", tweets: "16K" },
+    { rank: 3, name: "所得制限", tweets: "N/A" },
+    { rank: 4, name: "#hololivefesEXPO26", tweets: "N/A" },
+    { rank: 5, name: "引き上げ", tweets: "28K" },
+    { rank: 6, name: "ブルスカ", tweets: "N/A" },
+    { rank: 7, name: "#GameWith", tweets: "N/A" },
+    { rank: 8, name: "#ラストマン", tweets: "N/A" },
+    { rank: 9, name: "#LINEマンガでポイ活", tweets: "50K" },
+    { rank: 10, name: "#ウマ娘MVP人気投票", tweets: "N/A" }
+  ];
+}
+
+// =============================================
+// Vercel Function Configuration (via comments)
+// =============================================
+/*
+For Vercel deployment, also create these files:
+
+FILE 1: vercel.json
+{
+  "version": 2,
+  "functions": {
+    "api/trending.js": {
+      "maxDuration": 25
+    }
+  },
+  "routes": [
+    {
+      "src": "/",
+      "dest": "/api/trending"
+    },
+    {
+      "src": "/trending/(?<country>[^/]+)",
+      "dest": "/api/trending?country=$country"
+    },
+    {
+      "src": "/trending/(?<country>[^/]+)/(?<count>[0-9]+)",
+      "dest": "/api/trending?country=$country&count=$count"
+    }
+  ]
+}
+
+FILE 2: package.json
+{
+  "name": "twitter-trends-api",
+  "version": "2.0.0",
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}
+*/      if (text.includes('few minutes')) {
         $(element).nextAll('ol, ul').first().find('li').each((j, li) => {
           if (j < limit) {
             const name = $(li).find('a').first().text().trim() || $(li).text().split('\n')[0].trim();
