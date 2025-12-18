@@ -11,10 +11,6 @@
       "dest": "/api/trending"
     },
     {
-      "src": "/trending",
-      "dest": "/api/trending"
-    },
-    {
       "src": "/trending/(?<country>[^/]+)",
       "dest": "/api/trending?country=$country"
     },
