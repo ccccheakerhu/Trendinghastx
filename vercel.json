@@ -2,13 +2,17 @@
   "version": 2,
   "functions": {
     "api/trending.js": {
-      "maxDuration": 10
+      "maxDuration": 15,
+      "memory": 1024
     }
   },
   "routes": [
     {
       "src": "/",
-      "dest": "/api/trending"
+      "dest": "/api/trending",
+      "headers": {
+        "Cache-Control": "s-maxage=60, stale-while-revalidate=30"
+      }
     },
     {
       "src": "/trending",
@@ -17,6 +21,10 @@
     {
       "src": "/trending/(?<country>[^/]+)",
       "dest": "/api/trending?country=$country"
+    },
+    {
+      "src": "/trending/(?<country>[^/]+)/(?<count>[0-9]+)",
+      "dest": "/api/trending?country=$country&count=$count"
     },
     {
       "src": "/api/trending/(?<country>[^/]+)",
