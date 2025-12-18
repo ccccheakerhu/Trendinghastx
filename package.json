@@ -1,14 +1,24 @@
 {
   "name": "twitter-trends-api",
-  "version": "1.0.0",
-  "description": "API to get trending Twitter hashtags from trends24.in",
+  "version": "2.0.0",
+  "description": "Real-time Twitter trending hashtags API from trends24.in",
   "main": "api/trending.js",
-  "scripts": {
-    "start": "node api/trending.js"
-  },
   "engines": {
     "node": ">=24.x"
   },
+  "scripts": {
+    "start": "node api/trending.js",
+    "dev": "vercel dev"
+  },
+  "keywords": [
+    "twitter",
+    "trends",
+    "api",
+    "hashtags",
+    "japan"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
   "dependencies": {},
   "devDependencies": {}
 }
