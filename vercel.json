@@ -1,11 +1,10 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/trending.js",
-      "use": "@vercel/node"
+  "functions": {
+    "api/trending.js": {
+      "maxDuration": 10
     }
-  ],
+  },
   "routes": [
     {
       "src": "/",
@@ -23,10 +22,5 @@
       "src": "/api/trending/(?<country>[^/]+)",
       "dest": "/api/trending?country=$country"
     }
-  ],
-  "functions": {
-    "api/trending.js": {
-      "maxDuration": 10
-    }
-  }
+  ]
 }
