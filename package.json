@@ -1,0 +1,14 @@
+{
+  "name": "twitter-trends-api",
+  "version": "1.0.0",
+  "description": "API to get trending Twitter hashtags from trends24.in",
+  "main": "api/trending.js",
+  "scripts": {
+    "start": "node api/trending.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
