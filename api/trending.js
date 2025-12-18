@@ -1,40 +1,254 @@
+// api/trending.js - Complete Trending API
 export default async function handler(req, res) {
-  // CORS headers
+  // CORS headers setup
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-  
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+
+  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
+  // Only allow GET requests
+  if (req.method !== 'GET') {
+    return res.status(405).json({
+      success: false,
+      error: 'Only GET method is allowed'
+    });
+  }
+
   try {
     const { country = 'japan', count = 10 } = req.query;
+    const limit = Math.min(parseInt(count) || 10, 25); // Max 25 trends
     
-    // 1. trends24.in से real-time डेटा fetch करें
+    console.log(`📡 Fetching ${limit} trends for ${country}...`);
+
+    // Fetch from trends24.in with proper headers
     const response = await fetch(`https://trends24.in/${country.toLowerCase()}/`, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache'
+      },
+      timeout: 10000
     });
-    
+
+    if (!response.ok) {
+      throw new Error(`Website responded with status: ${response.status} ${response.statusText}`);
+    }
+
     const html = await response.text();
     
-    // 2. "few minutes ago" सेक्शन ढूंढें और पार्स करें
-    const trends = [];
+    // Parse trends from HTML
+    const trends = parseTrends24Data(html, limit);
+
+    // Send successful response
+    return res.status(200).json({
+      success: true,
+      api_version: "1.0",
+      country: country.toLowerCase(),
+      requested_at: new Date().toISOString(),
+      data_source: "trends24.in",
+      section: "few_minutes_ago",
+      count: trends.length,
+      trends: trends
+    });
+
+  } catch (error) {
+    console.error('❌ API Error:', error.message);
     
-    // Method 1: टेबल स्ट्रक्चर से पार्स करें (जो वेबसाइट अभी use कर रही है)
-    const tableRegex = /<table[^>]*>[\s\S]*?few minutes ago[\s\S]*?<\/table>/i;
-    const tableMatch = html.match(tableRegex);
+    // Return error with fallback data
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      note: "Website structure might have changed. Check trends24.in manually.",
+      fallback_data: getFallbackData()
+    });
+  }
+}
+
+// Main parsing function
+function parseTrends24Data(html, limit) {
+  const trends = [];
+  
+  console.log("🔄 Parsing HTML content...");
+  
+  // PATTERN 1: Find "few minutes ago" section specifically
+  const fewMinutesSection = extractFewMinutesSection(html);
+  
+  if (fewMinutesSection) {
+    console.log("✅ Found 'few minutes ago' section");
+    const parsed = parseTrendList(fewMinutesSection, limit);
+    if (parsed.length > 0) return parsed;
+  }
+  
+  // PATTERN 2: Try to find any trending lists
+  const trendingLists = html.match(/<ol[^>]*>[\s\S]*?<\/ol>|<ul[^>]*>[\s\S]*?<\/ul>/gi);
+  
+  if (trendingLists) {
+    for (const list of trendingLists) {
+      if (list.length > 100) { // Reasonable minimum length
+        const parsed = parseTrendList(list, limit);
+        if (parsed.length > 2) return parsed; // Need at least 2 valid trends
+      }
+    }
+  }
+  
+  // PATTERN 3: Look for trend items in tables (new structure)
+  const trendTable = html.match(/<table[^>]*class="[^"]*trend[^"]*"[\s\S]*?<\/table>/i);
+  if (trendTable) {
+    console.log("✅ Found trend table");
+    return parseTrendTable(trendTable[0], limit);
+  }
+  
+  // PATTERN 4: Last resort - find all trend links
+  return findAllTrendLinks(html, limit);
+}
+
+// Extract "few minutes ago" section
+function extractFewMinutesSection(html) {
+  // Try different patterns for "few minutes ago"
+  const patterns = [
+    /few minutes ago[\s\S]*?<ol[^>]*>([\s\S]*?)<\/ol>/i,
+    /<h[234][^>]*>few minutes ago[\s\S]*?<ol[^>]*>([\s\S]*?)<\/ol>/i,
+    /few minutes ago[\s\S]*?<ul[^>]*>([\s\S]*?)<\/ul>/i
+  ];
+  
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+  
+  return null;
+}
+
+// Parse a list of trends (ol/ul)
+function parseTrendList(listHtml, limit) {
+  const trends = [];
+  const items = listHtml.match(/<li[^>]*>([\s\S]*?)<\/li>/gi) || [];
+  
+  for (let i = 0; i < Math.min(items.length, limit); i++) {
+    const item = items[i];
     
-    if (tableMatch) {
-      const tableHtml = tableMatch[0];
-      const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-      let rowMatch;
-      let trendCount = 0;
+    // Extract trend name
+    let name = '';
+    const nameMatch = item.match(/<a[^>]*>([^<]+)<\/a>/) || 
+                     item.match(/>\s*([^<>#][^<>]*[^<>])\s*</) ||
+                     item.match(/>\s*([^<]+)\s*</);
+    
+    if (nameMatch) {
+      name = nameMatch[1].trim();
       
-      while ((rowMatch = rowRegex.exec(tableHtml)) !== null && trendCount < count) {
-        const row = rowMatch[1];
+      // Skip if it's clearly not a trend
+      if (name.length < 2 || name.toLowerCase().includes('trend') || 
+          name.includes('href=') || name.includes('http')) {
+        continue;
+      }
+    } else {
+      continue; // Skip if no name found
+    }
+    
+    // Extract tweet count
+    let tweets = 'N/A';
+    const countMatch = item.match(/>\s*([0-9]+[KkM]?)\s*</) ||
+                      item.match(/([0-9]+[KkM]?)\s*tweets?/i) ||
+                      item.match(/<span[^>]*>([0-9]+[KkM]?)<\/span>/i);
+    
+    if (countMatch) {
+      tweets = countMatch[1].toUpperCase();
+    }
+    
+    trends.push({
+      rank: trends.length + 1,
+      name: name,
+      tweets: tweets,
+      url: `https://twitter.com/search?q=${encodeURIComponent(name)}`
+    });
+  }
+  
+  return trends;
+}
+
+// Parse trend table
+function parseTrendTable(tableHtml, limit) {
+  const trends = [];
+  const rows = tableHtml.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+  
+  for (let i = 0; i < Math.min(rows.length, limit); i++) {
+    const row = rows[i];
+    const nameMatch = row.match(/<a[^>]*>([^<]+)<\/a>/i);
+    
+    if (nameMatch) {
+      const name = nameMatch[1].trim();
+      
+      // Extract count from row
+      let tweets = 'N/A';
+      const countMatch = row.match(/>\s*([0-9\.]+[KkM]?)\s*</gi);
+      if (countMatch) {
+        // Find the count that's not part of the name
+        for (const match of countMatch) {
+          const count = match.replace(/[<>]/g, '').trim();
+          if (count !== name && /^[0-9\.]+[KkM]?$/i.test(count)) {
+            tweets = count.toUpperCase();
+            break;
+          }
+        }
+      }
+      
+      trends.push({
+        rank: trends.length + 1,
+        name: name,
+        tweets: tweets
+      });
+    }
+  }
+  
+  return trends;
+}
+
+// Find all trend links in HTML
+function findAllTrendLinks(html, limit) {
+  const trends = [];
+  
+  // Look for common trend patterns
+  const trendRegex = /<a[^>]*href="[^"]*q=[^"]*"[^>]*>([^<]+)<\/a>|<a[^>]*>#([^<]+)<\/a>|<a[^>]*>([^<>#][^<>]{2,})<\/a>/gi;
+  let match;
+  
+  while ((match = trendRegex.exec(html)) !== null && trends.length < limit) {
+    const name = (match[1] || match[2] || match[3]).trim();
+    
+    if (name && name.length > 1 && !name.includes('http') && !name.includes('trends24')) {
+      trends.push({
+        rank: trends.length + 1,
+        name: name,
+        tweets: 'N/A'
+      });
+    }
+  }
+  
+  return trends;
+}
+
+// Fallback data if parsing fails
+function getFallbackData() {
+  return [
+    { rank: 1, name: "年収の壁", tweets: "23K" },
+    { rank: 2, name: "無期徴役", tweets: "16K" },
+    { rank: 3, name: "所得制限", tweets: "N/A" },
+    { rank: 4, name: "#hololivefesEXPO26", tweets: "N/A" },
+    { rank: 5, name: "引き上げ", tweets: "28K" },
+    { rank: 6, name: "ブルスカ", tweets: "N/A" },
+    { rank: 7, name: "#GameWith", tweets: "N/A" },
+    { rank: 8, name: "#ラストマン", tweets: "N/A" },
+    { rank: 9, name: "#LINEマンガでポイ活", tweets: "50K" },
+    { rank: 10, name: "#ウマ娘MVP人気投票", tweets: "N/A" }
+  ];
+}        const row = rowMatch[1];
         
         // ट्रेंड नाम और ट्वीट काउंट निकालें
         const nameMatch = row.match(/<a[^>]*>([^<]+)<\/a>/);
